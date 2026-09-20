@@ -1,0 +1,285 @@
+*centerish.txt*  Center your editing area in Neovim.               *centerish*
+
+Centerish uses horizontal padding to keep editing windows in the middle of
+the screen. Existing splits keep their proportions. Recognized sidebars use
+the margins, and adaptive width can give long visible lines more space.
+
+Requires Neovim 0.10 or newer.
+
+CONTENTS                                                  *centerish-contents*
+
+    Getting started ................................. |centerish-quickstart|
+    Commands ........................................ |centerish-commands|
+    Configuration ................................... |centerish-config|
+    Layout .......................................... |centerish-layout|
+    Adaptive width .................................. |centerish-adaptive|
+    Sessions ........................................ |centerish-sessions|
+    Lua API ......................................... |centerish-api|
+    License ......................................... |centerish-license|
+
+==============================================================================
+GETTING STARTED                                         *centerish-quickstart*
+
+Open a file and run: >vim
+
+    :CenterishToggle
+<
+Padding appears when your screen has room for it. Run the command again to
+remove the padding. Each tab is controlled separately; new tabs start off.
+
+The default editor target is 120 columns. For optional configuration, see
+|centerish-config|.
+
+To add a toggle key: >lua
+
+    vim.keymap.set("n", "<leader>uc", "<cmd>CenterishToggle<cr>", {
+      desc = "Toggle centering",
+    })
+<
+
+==============================================================================
+COMMANDS                                                  *centerish-commands*
+
+:CenterishEnable                                            *:CenterishEnable*
+    Enable centering in the current tab. Calling it again updates the layout
+    without resetting adaptive growth.
+
+:CenterishDisable                                          *:CenterishDisable*
+    Remove the current tab's padding and reset its adaptive growth. Editing
+    windows remain open. Their sizes from before centering are not restored.
+
+:CenterishToggle                                            *:CenterishToggle*
+    Disable an enabled tab, or enable a disabled tab.
+
+The corresponding Lua functions are listed in |centerish-api|.
+
+==============================================================================
+CONFIGURATION                                               *centerish-config*
+
+Pass a table to |centerish.setup()|, including only the options you want to
+change. Every call starts from fresh defaults, rather than the previous
+configuration. The configuration is shared across tabs. Each tab remembers
+its own enabled state and adaptive growth.
+
+With lazy.nvim, the same options can be supplied in the plugin's opts table.
+
+Default configuration: >lua
+
+    require("centerish").setup({
+      width = 120,
+      min_padding_width = 10,
+      padding = {
+        left = true,
+        right = true,
+      },
+      sidebars = {
+        NvimTree = "left",
+        ["neo-tree"] = "left",
+      },
+      adaptive = {
+        enabled = false,
+        direction = "right",
+        max_width = 160,
+      },
+    })
+<
+width                                                        *centerish-width*
+    Positive integer. Default: 120.
+
+    Target width for each side-by-side editing column, including number,
+    sign, and fold gutters. Windows stacked above each other share a column.
+    Unequal splits retain their proportions, so an individual window may be
+    wider or narrower than the target. See |centerish-layout|.
+
+min_padding_width                                *centerish-min-padding-width*
+    Non-negative integer. Default: 10.
+
+    Hide padding narrower than this many columns, excluding its separator.
+    Its space goes to editing windows. Padding returns when there is room.
+    A value of 0 still respects Neovim's minimum window width.
+
+padding                                                    *centerish-padding*
+    Table. Fields left and right are booleans, both defaulting to true.
+
+    Choose which padding sides to show. Disabling one side gives its space
+    to editing windows while leaving the opposite centered margin in place.
+    See the width example in |centerish-layout|.
+
+sidebars                                                  *centerish-sidebars*
+    Map of buffer filetypes to "left", "right", or false.
+    Default: { NvimTree = "left", ["neo-tree"] = "left" }.
+
+    A recognized sidebar uses its side's margin before taking space from the
+    editing area. Its width is preserved when the available space permits.
+    This is intended for full-height sidebars at the tab's edges.
+
+    Set the side to match where your sidebar opens. For example, recognize
+    neo-tree on the right and treat NvimTree as an ordinary editor: >lua
+
+        require("centerish").setup({
+          sidebars = {
+            NvimTree = false,
+            ["neo-tree"] = "right",
+          },
+        })
+<
+    To find a buffer's filetype, focus it and run :set filetype?. The table
+    classifies windows by filetype; it does not open or relocate a sidebar.
+
+adaptive.enabled                                  *centerish-adaptive-enabled*
+    Boolean. Default: false.
+
+    Widen editing windows to fit visible lines by consuming available padding.
+    See |centerish-adaptive| for measurement and growth behavior.
+
+adaptive.direction                              *centerish-adaptive-direction*
+    "right" or "both". Default: "right".
+
+    "right" consumes right padding, keeping the left edge in place. Enable
+    right padding to use this mode.
+
+    "both" consumes equal amounts of padding from each side. Growth stops
+    when either side has no padding left.
+
+adaptive.max_width                              *centerish-adaptive-max-width*
+    Positive integer. Default: 160.
+
+    Maximum width requested by adaptive growth for an editing window. This
+    does not shrink windows that are already wider or override split and
+    minimum-width constraints.
+
+==============================================================================
+LAYOUT                                                      *centerish-layout*
+
+Sizing ~
+
+By default, Centerish centers the editing area horizontally.
+Each side-by-side column contributes its target width; stacked windows share
+a column. Internal separators also take space. Existing split proportions
+are preserved when minimum and fixed widths allow it.
+
+A window with 'winfixwidth' uses its current width as its target. Centerish
+keeps fixed widths when there is enough space. Padding shrinks or disappears
+as the terminal narrows and returns when space becomes available.
+
+Manual resizing ~
+
+Centerish keeps the outer edges you choose when manually resizing the editing
+area. Moving those edges pauses adaptive growth. Resizing splits within those
+edges keeps growth active. Disabling and re-enabling centering restores the
+configured layout. Terminal resizing and minimum-width constraints can still
+move the edges.
+
+Padding and sidebars ~
+
+Disabling one padding side gives its space to the editing area. With a single
+editor, width = 100, and a 300-column screen:
+
+    Padding          Left margin    Editor width    Right margin
+    Both sides               100             100             100
+    Left only                100             200               0
+    Right only                 0             200             100
+    Neither side               0             300               0
+
+The margins include their separators. These values assume no sidebars or
+adaptive growth. To keep only the left margin: >lua
+
+    require("centerish").setup({
+      width = 100,
+      padding = { right = false },
+    })
+<
+A sidebar that fits within its margin leaves the editing area in place. A
+wider sidebar consumes padding on the other side before reducing the editing
+area below its target. Floating windows are excluded from width calculations.
+
+Navigation and closing ~
+
+Window navigation skips padding. Moving into padding at an outer edge wraps
+across the tab, including with CTRL-W h and CTRL-W l. Sidebars remain
+accessible.
+
+Closing all editing windows in an enabled tab removes its padding and disables
+centering for that tab.
+
+==============================================================================
+ADAPTIVE WIDTH                                            *centerish-adaptive*
+
+Adaptive width measures visible lines and uses spare padding to widen their
+editing windows. It is off by default. To enable it: >lua
+
+    require("centerish").setup({
+      width = 100,
+      adaptive = {
+        enabled = true,
+        direction = "right",
+        max_width = 160,
+      },
+    })
+<
+Measurements use display columns, including tabs, wide characters, and window
+gutters. Lines outside the viewport and closed folds do not trigger growth.
+Conceal, virtual text, and custom fold text are not included in measurements.
+
+The default direction consumes right padding. Use direction = "both" to take
+the same amount from each side. Available padding, max_width, and fixed-width
+windows limit growth. A fixed window can prevent its stacked column from
+growing.
+
+Growth is remembered for the tab. Scrolling to shorter lines or changing
+buffers does not undo it. Terminal resizing can still make windows narrower.
+To reset growth: >lua
+
+    require("centerish").disable()
+    require("centerish").enable()
+<
+==============================================================================
+SESSIONS                                                  *centerish-sessions*
+
+Save and load sessions with Neovim's native commands: >vim
+
+    :mksession Session.vim
+    :source Session.vim
+<
+Load Centerish before sourcing the session. With vim.pack, pass
+{ load = true } as the second argument to vim.pack.add(). With lazy.nvim,
+use lazy = false in the plugin specification to load it at startup.
+
+Keep "blank" in 'sessionoptions' so padding can be saved. If you have removed
+it, add it back in your configuration: >lua
+
+    vim.opt.sessionoptions:append("blank")
+<
+Restoration keeps saved adaptive growth and manual resizing. It recalculates
+the layout using your current configuration and screen size. Tabs without
+saved padding are not automatically enabled. Use |:CenterishEnable| in those
+tabs. This also applies when the screen was too narrow or both padding sides
+were disabled when the session was saved.
+
+==============================================================================
+LUA API                                                        *centerish-api*
+
+require("centerish").setup(opts)                           *centerish.setup()*
+    Configure Centerish with an optional options table.
+    See |centerish-config|.
+    Setup does not enable centering or create mappings. An enabled current
+    tab is refreshed; other enabled tabs use the configuration on their next
+    refresh, including when you enter them.
+
+require("centerish").enable()                             *centerish.enable()*
+    Enable or update the current tab without resetting adaptive growth.
+    Equivalent to |:CenterishEnable|.
+
+require("centerish").disable()                           *centerish.disable()*
+    Remove padding and reset growth for the current tab.
+    Equivalent to |:CenterishDisable|.
+
+require("centerish").toggle()                             *centerish.toggle()*
+    Toggle centering for the current tab. Equivalent to |:CenterishToggle|.
+
+==============================================================================
+LICENSE                                                    *centerish-license*
+
+MIT license. See LICENSE in the plugin's root directory for the full terms.
+
+vim:tw=78:ts=8:ft=help:norl:
