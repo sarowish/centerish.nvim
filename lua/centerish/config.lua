@@ -12,19 +12,31 @@ local M = {}
 ---@field direction? centerish.GrowthDirection Padding to consume. Defaults to "right".
 ---@field max_width? integer Maximum requested width per editor. Defaults to 160.
 
+---@class (exact) centerish.SidebarConfig
+---@field side centerish.Side Sidebar position.
+---@field preserve_width? boolean Keep settled width across editor and screen changes. Defaults to false.
+
+---@class centerish.ResolvedSidebarConfig: centerish.SidebarConfig
+---@field preserve_width boolean
+
 ---@class (exact) centerish.Config
 ---@field width? integer Centered target width, including gutters. Defaults to 120.
 ---@field min_padding_width? integer Minimum padding width, excluding separators. Defaults to 10.
 ---@field padding? centerish.PaddingConfig
----@field sidebars? table<string, centerish.Side|false> Filetype positions; false disables recognition.
+---@field sidebars? table<string, centerish.Side|centerish.SidebarConfig|false> Filetype settings; false disables recognition.
 ---@field adaptive? centerish.AdaptiveConfig
 
----@class centerish.ResolvedConfig
+---@class centerish.MergedConfig
 ---@field width integer
 ---@field min_padding_width integer
 ---@field padding { left: boolean, right: boolean }
----@field sidebars table<string, centerish.Side|false>
+---@field sidebars table<string, centerish.Side|centerish.SidebarConfig|false>
 ---@field adaptive { enabled: boolean, direction: centerish.GrowthDirection, max_width: integer }
+
+---@class centerish.ResolvedConfig: centerish.MergedConfig
+---@field sidebars table<string, centerish.ResolvedSidebarConfig|false>
+
+---@type centerish.MergedConfig
 local defaults = {
   width = 120,
   min_padding_width = 10,
@@ -37,7 +49,6 @@ local defaults = {
 ---@param opts? centerish.Config
 ---@return centerish.ResolvedConfig
 function M.resolve(opts)
-  ---@type centerish.ResolvedConfig
   local candidate = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
 
   assert(
@@ -56,11 +67,22 @@ function M.resolve(opts)
     assert(type(candidate.padding[side]) == "boolean", "centerish: padding values must be booleans")
   end
 
-  for _, side in pairs(candidate.sidebars) do
-    assert(
-      side == "left" or side == "right" or side == false,
-      "centerish: sidebar positions must be left, right, or false"
-    )
+  for filetype, value in pairs(candidate.sidebars) do
+    if value ~= false then
+      local sidebar = type(value) == "table" and value or { side = value }
+      assert(
+        sidebar.side == "left" or sidebar.side == "right",
+        "centerish: sidebar side must be left or right"
+      )
+      assert(
+        sidebar.preserve_width == nil or type(sidebar.preserve_width) == "boolean",
+        "centerish: sidebar preserve_width must be a boolean"
+      )
+      candidate.sidebars[filetype] = {
+        side = sidebar.side,
+        preserve_width = sidebar.preserve_width == true,
+      }
+    end
   end
 
   assert(
@@ -78,6 +100,7 @@ function M.resolve(opts)
     "centerish: adaptive.max_width must be a positive integer"
   )
 
+  ---@cast candidate centerish.ResolvedConfig
   return candidate
 end
 

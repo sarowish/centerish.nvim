@@ -184,6 +184,41 @@ return function()
       assert(width == 90, "editor resize beside sidebar was reverted")
     end
 
+    -- Native resize commands must keep their chosen edges when switching buffers,
+    -- including when opted-in sidebar space is borrowed by the resize.
+    for _, with_sidebar in ipairs({ false, "left", { side = "left", preserve_width = true } }) do
+      scenario = "native resize and buffer switch, sidebar=" .. vim.inspect(with_sidebar)
+      request("nvim_ui_try_resize", { 400, 40 })
+      request("nvim_exec_lua", { setup, { vim.fn.getcwd(), 1, false, false, {} } })
+      local buf = request("nvim_exec_lua", {
+        [[
+          local setting = ...
+          if setting then
+            require('centerish').setup({
+              width = 80, min_padding_width = 0,
+              sidebars = { NvimTree = setting },
+            })
+            vim.cmd('topleft 20vnew')
+            vim.bo.filetype = 'NvimTree'
+            vim.wo.winfixwidth = true
+            vim.api.nvim_set_current_win(editors[1])
+          end
+          return vim.api.nvim_create_buf(true, false)
+        ]],
+        { with_sidebar },
+      })
+      settle()
+      request("nvim_exec_lua", { "resize_events = {}", {} })
+      request("nvim_input", { ":vert res +10 | buffer " .. buf .. "<CR>" })
+      check()
+      local result = request("nvim_exec_lua", {
+        "return { vim.api.nvim_win_get_width(editors[1]), vim.api.nvim_win_get_buf(editors[1]) }",
+        {},
+      })
+      assert(result[1] == 90, "buffer switch reverted the explicit editor resize")
+      assert(result[2] == buf, "resize command did not switch buffers")
+    end
+
     -- Crossing the padding threshold must keep the native drag target alive
     -- until release, including when the mouse reaches an adjacent sidebar.
     for _, drag in ipairs({

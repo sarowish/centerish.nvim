@@ -106,12 +106,13 @@ padding                                                    *centerish-padding*
     See the width example in |centerish-layout|.
 
 sidebars                                                  *centerish-sidebars*
-    Map of buffer filetypes to "left", "right", or false.
+    Map of buffer filetypes to "left", "right", a settings table, or false.
     Default: { NvimTree = "left", ["neo-tree"] = "left" }.
 
     A recognized sidebar uses its side's margin before taking space from the
-    editing area. Its width is preserved when the available space permits.
-    This is intended for full-height sidebars at the tab's edges.
+    editing area. By default, Centerish sizes padding around the sidebar's
+    current width. This is intended for full-height sidebars at the tab's
+    edges.
 
     Set the side to match where your sidebar opens. For example, recognize
     neo-tree on the right and treat NvimTree as an ordinary editor: >lua
@@ -123,6 +124,24 @@ sidebars                                                  *centerish-sidebars*
           },
         })
 <
+    A settings table requires side = "left" or "right" and accepts
+    preserve_width, a boolean that defaults to false.
+
+    Set preserve_width = true to keep the sidebar's previous width when
+    switching files, changing editor splits, or resizing Neovim. Centerish
+    then overrides automatic widening or shrinking during those changes,
+    including resizing requested by other plugins. For example: >lua
+
+        require("centerish").setup({
+          sidebars = {
+            ["codediff-explorer"] = { side = "left", preserve_width = true },
+          },
+        })
+<
+    You can still resize the sidebar manually. Centerish remembers its new
+    width and preserves it on later file switches, split changes, or resizes
+    of Neovim.
+
     To find a buffer's filetype, focus it and run :set filetype?. The table
     classifies windows by filetype; it does not open or relocate a sidebar.
 

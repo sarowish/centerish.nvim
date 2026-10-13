@@ -30,9 +30,16 @@ local config = configuration.resolve()
 ---@field last_win integer Last focused window outside padding.
 ---@field restore_quit? fun() Restore padding after a refused native quit.
 ---@field widths? centerish.WidthMap Last stable editor widths.
+---@field buffers? table<integer, integer> Last editor buffers.
 ---@field columns? integer Screen width when those widths were captured.
+---@field lines? integer Screen height when those widths were captured.
 ---@field tree? vim.fn.winlayout.ret Last editor-only layout.
 ---@field sidebars? centerish.WidthMap Last sidebar widths.
+---@field actual_sidebars? centerish.WidthMap Last observed native sidebar widths.
+---@field preserved_sidebars? centerish.WidthMap Sidebar widths before layout work, retained until idle.
+---@field sidebar_requests? centerish.WidthMap Explicit Lua sidebar width requests awaiting a refresh.
+---@field manual_sidebars? centerish.WindowSet Sidebars receiving native resize input.
+---@field manual_sidebar_widths? centerish.WidthMap Sidebar widths after that native input.
 ---@field layout? vim.fn.winlayout.ret Last complete layout.
 ---@field spans? centerish.Spans Last stable padding spans, including separators.
 ---@field bounds? centerish.EditorBounds Last stable outer editor edges.
@@ -79,10 +86,10 @@ local function scan(state)
       and not padding.is_owned(state, win)
     then
       local buf = vim.api.nvim_win_get_buf(win)
-      local side = config.sidebars[vim.bo[buf].filetype]
+      local sidebar = config.sidebars[vim.bo[buf].filetype]
 
-      if side then
-        table.insert(sidebars[side], win)
+      if sidebar then
+        table.insert(sidebars[sidebar.side], win)
       else
         editors[win] = true
       end
@@ -178,6 +185,77 @@ local function editor_bounds(editors)
   return { left = left, right = right }
 end
 
+---Capture native sidebar resizing before a buffer callback can request another width.
+---@param state centerish.TabState
+local function remember_manual_sidebars(state)
+  if not state.manual_sidebars then
+    return
+  end
+  state.manual_sidebar_widths = state.manual_sidebar_widths or {}
+  for win in pairs(state.manual_sidebars) do
+    if valid(win) then
+      local width = vim.api.nvim_win_get_width(win)
+      state.manual_sidebar_widths[win] = width
+      if state.preserved_sidebars then
+        state.preserved_sidebars[win] = width
+      end
+      if state.sidebar_requests then
+        state.sidebar_requests[win] = nil
+      end
+    end
+  end
+  state.manual_sidebars = nil
+end
+
+---Keep the pre-change widths through scheduled layout callbacks, including new refreshes.
+---@param state centerish.TabState
+local function preserve_sidebars(state)
+  if not state.preserved_sidebars then
+    state.preserved_sidebars =
+      vim.tbl_extend("force", {}, state.sidebars or {}, state.manual_sidebar_widths or {})
+  end
+end
+
+---@param state centerish.TabState
+local function remember_sidebar_geometry(state)
+  state.actual_sidebars = {}
+  for win in pairs(state.sidebars or {}) do
+    if valid(win) then
+      state.actual_sidebars[win] = vim.api.nvim_win_get_width(win)
+    end
+  end
+end
+
+---Capture native sizing before leaving a sidebar or forwarding a Lua width request.
+---Lua sizing, screen changes and unfinished layout work are already accounted for.
+---@param state centerish.TabState
+---@param win integer
+local function remember_sidebar_resize(state, win)
+  if
+    state.preserved_sidebars
+    or state.automatic_resize
+    or state.columns ~= vim.o.columns
+    or state.lines ~= vim.o.lines
+    or not state.actual_sidebars
+    or not state.actual_sidebars[win]
+    or state.actual_sidebars[win] == vim.api.nvim_win_get_width(win)
+  then
+    return
+  end
+  local editors = scan(state)
+  if not vim.deep_equal(layout.editors(vim.fn.winlayout(), editors), state.tree) then
+    return
+  end
+  for editor, buf in pairs(state.buffers or {}) do
+    if not valid(editor) or vim.api.nvim_win_get_buf(editor) ~= buf then
+      return
+    end
+  end
+  state.manual_sidebars = state.manual_sidebars or {}
+  state.manual_sidebars[win] = true
+  remember_manual_sidebars(state)
+end
+
 ---Remember externally resized edges while the screen and surrounding layout are unchanged.
 ---Compare with the last applied geometry so delayed events from our own sizing are ignored.
 ---@param state centerish.TabState
@@ -207,6 +285,10 @@ end
 ---@param state centerish.TabState
 local function update(state)
   local editors, sidebars = scan(state)
+  local has_sidebars = #sidebars.left + #sidebars.right > 0
+  if not has_sidebars then
+    state.preserved_sidebars = nil
+  end
   if not next(editors) then
     local tab = vim.api.nvim_get_current_tabpage()
     padding.close(state, "left")
@@ -215,27 +297,56 @@ local function update(state)
     return
   end
 
+  local editor_tree = assert(layout.editors(vim.fn.winlayout(), editors))
+  local buffers = {}
+  for win in pairs(editors) do
+    buffers[win] = vim.api.nvim_win_get_buf(win)
+  end
+  local editors_changed = not vim.deep_equal(editor_tree, state.tree)
+    or not vim.deep_equal(buffers, state.buffers)
+  local manual, automatic = state.manual_resize, state.automatic_resize
+  state.manual_resize, state.automatic_resize = nil, nil
+  local screen_resized = state.columns and state.columns ~= vim.o.columns
+    or state.lines and state.lines ~= vim.o.lines
+  remember_manual_sidebars(state)
+  if state.widths and has_sidebars and (editors_changed or screen_resized) then
+    preserve_sidebars(state)
+  end
+  -- Opted-in sidebars keep their settled width across screen and editor changes.
+  -- Native editor resizing takes precedence, even when it switches buffers.
+  local preserving = false
   local widths, occupied = {}, { left = 0, right = 0 }
   for side, wins in pairs(sidebars) do
     for _, win in ipairs(wins) do
-      widths[win] = vim.api.nvim_win_get_width(win)
+      local sidebar = config.sidebars[vim.bo[vim.api.nvim_win_get_buf(win)].filetype]
+      if
+        not manual
+        and sidebar
+        and sidebar.preserve_width
+        and state.preserved_sidebars
+        and state.preserved_sidebars[win]
+      then
+        widths[win] = state.preserved_sidebars[win]
+        preserving = true
+      else
+        widths[win] = not manual and state.sidebar_requests and state.sidebar_requests[win]
+          or vim.api.nvim_win_get_width(win)
+      end
       occupied[side] = occupied[side] + widths[win] + 1
     end
   end
 
-  local editor_tree = assert(layout.editors(vim.fn.winlayout(), editors))
   local bounds = editor_bounds(editors)
-  local manual, automatic = state.manual_resize, state.automatic_resize
-  state.manual_resize, state.automatic_resize = nil, nil
   local sidebar_changed = not vim.deep_equal(widths, state.sidebars)
   local stable = state.widths
-    and state.columns == vim.o.columns
+    and not screen_resized
+    and (manual or not state.preserved_sidebars)
     and vim.deep_equal(editor_tree, state.tree)
     and vim.deep_equal(state.layout, vim.fn.winlayout())
   local weights, fixed, targets, minima = {}, {}, {}, {}
   local previous = state.widths
     and vim.deep_equal(editor_tree, state.tree)
-    and (state.columns ~= vim.o.columns or (sidebar_changed and not manual))
+    and (screen_resized or (sidebar_changed and not manual))
   for win in pairs(editors) do
     weights[win] = previous and state.widths[win] or vim.api.nvim_win_get_width(win)
     fixed[win] = vim.wo[win].winfixwidth or nil
@@ -267,7 +378,12 @@ local function update(state)
     state.adjustment.left = state.adjustment.left + saved.left - spans.left
     state.adjustment.right = state.adjustment.right + saved.right - spans.right
   end
-  if stable and (not sidebar_changed or manual) and (not automatic or manual) then
+  if
+    stable
+    and not preserving
+    and (not sidebar_changed or manual)
+    and (not automatic or manual)
+  then
     remember_resize(state, bounds, spans, target)
   end
   if state.adjustment then
@@ -338,8 +454,18 @@ local function update(state)
     state.widths[win] = vim.api.nvim_win_get_width(win)
   end
   state.columns = vim.o.columns
+  state.lines = vim.o.lines
   state.tree = editor_tree
+  state.buffers = buffers
   state.sidebars = widths
+  remember_sidebar_geometry(state)
+  state.sidebar_requests = nil
+  state.manual_sidebar_widths = nil
+  if manual and state.preserved_sidebars then
+    for win, width in pairs(widths) do
+      state.preserved_sidebars[win] = width
+    end
+  end
   state.layout = vim.fn.winlayout()
   state.target = target
   state.spans = { left = 0, right = 0 }
@@ -460,6 +586,80 @@ local function queue_refresh()
   end
 end
 
+---Remember sidebar widths before buffer callbacks and their scheduled layout work.
+local function prepare_buffer_change()
+  if busy or dragging or session_loading() then
+    return
+  end
+  local state = tabs[vim.api.nvim_get_current_tabpage()]
+  if not state or state.restore_quit or not state.buffers then
+    return
+  end
+  remember_manual_sidebars(state)
+  local editors = scan(state)
+  local win = vim.api.nvim_get_current_win()
+  if
+    not editors[win]
+    or not state.buffers[win]
+    or state.buffers[win] == vim.api.nvim_win_get_buf(win)
+  then
+    return
+  end
+  if state.sidebars and next(state.sidebars) then
+    preserve_sidebars(state)
+  end
+end
+
+---Remember sidebar requests even if later editor resizing temporarily clips them.
+---Forward width calls without changing other windows or their handles.
+local function install_width_observer()
+  local set_width = vim.api.nvim_win_set_width
+  ---@diagnostic disable-next-line: duplicate-set-field
+  vim.api.nvim_win_set_width = function(win, width)
+    local state, tab
+    local target = win == 0 and vim.api.nvim_get_current_win() or win
+    if not busy and not dragging and not session_loading() and next(tabs) then
+      if valid(target) then
+        tab = vim.api.nvim_win_get_tabpage(target)
+        state = tabs[tab]
+        if state and not state.restore_quit then
+          remember_sidebar_resize(state, vim.api.nvim_get_current_win())
+          remember_manual_sidebars(state)
+        else
+          state = nil
+        end
+      end
+    end
+    set_width(win, width)
+    if not state or not valid(target) then
+      return
+    end
+    remember_sidebar_geometry(state)
+    local sidebar = config.sidebars[vim.bo[vim.api.nvim_win_get_buf(target)].filetype]
+    if sidebar then
+      local win_config = vim.api.nvim_win_get_config(target)
+      if win_config.relative == "" and not win_config.external then
+        state.sidebar_requests = state.sidebar_requests or {}
+        state.sidebar_requests[target] = math.max(1, vim.o.winminwidth, width)
+      end
+    end
+    for sidebar_win, requested in pairs(state.sidebar_requests or {}) do
+      if
+        valid(sidebar_win)
+        and (
+          not state.sidebars
+          or state.sidebars[sidebar_win] ~= requested
+          or vim.api.nvim_win_get_width(sidebar_win) ~= requested
+        )
+      then
+        refresh_tabs[assert(tab)] = true
+        schedule_updates()
+        break
+      end
+    end
+  end
+end
+
 ---Handle resizes before redraw; coalesce other events and changes made during a drag.
 ---@param event? vim.api.keyset.create_autocmd.callback_args
 local function schedule(event)
@@ -478,7 +678,10 @@ local function mark_manual_resize(win)
   local state = tabs[vim.api.nvim_get_current_tabpage()]
   if state and valid(win) then
     local buf = vim.api.nvim_win_get_buf(win)
-    if not config.sidebars[vim.bo[buf].filetype] then
+    if config.sidebars[vim.bo[buf].filetype] then
+      state.manual_sidebars = state.manual_sidebars or {}
+      state.manual_sidebars[win] = true
+    else
       state.manual_resize = true
     end
   end
@@ -554,6 +757,7 @@ local function install_events()
 
   group = vim.api.nvim_create_augroup("centerish", { clear = true })
   install_resize_input()
+  install_width_observer()
 
   vim.api.nvim_create_autocmd("OptionSet", {
     group = group,
@@ -660,13 +864,37 @@ local function install_events()
     "WinClosed",
     "VimResized",
     "TabEnter",
-    "BufWinEnter",
     "FileType",
     "WinScrolled",
     "TextChanged",
     "TextChangedI",
     "TextChangedP",
   }, { group = group, callback = schedule })
+
+  vim.api.nvim_create_autocmd("BufWinEnter", {
+    group = group,
+    nested = true,
+    callback = function(event)
+      prepare_buffer_change()
+      schedule(event)
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("WinLeave", {
+    group = group,
+    callback = function()
+      local state = tabs[vim.api.nvim_get_current_tabpage()]
+      if
+        not busy
+        and not dragging
+        and not session_loading()
+        and state
+        and not state.restore_quit
+      then
+        remember_sidebar_resize(state, vim.api.nvim_get_current_win())
+      end
+    end,
+  })
 
   -- Padding may be created or removed here. Keep its normal lifecycle events
   -- visible to other plugins while our transaction guard prevents recursion.
@@ -679,6 +907,18 @@ local function install_events()
       local state = tabs[vim.api.nvim_get_current_tabpage()]
       if state and not vim.deep_equal(state.layout, vim.fn.winlayout()) then
         schedule()
+      end
+      if
+        not busy
+        and not dragging
+        and not pending
+        and not next(refresh_tabs)
+        and not session_loading()
+      then
+        for _, tab_state in pairs(tabs) do
+          tab_state.preserved_sidebars = nil
+          tab_state.sidebar_requests = nil
+        end
       end
     end,
   })

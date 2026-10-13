@@ -168,6 +168,47 @@ local function positioned(pad, side, sidebars)
     and tree[2][index][2] == pad.win
 end
 
+---Temporarily make room for two minimum-width windows and their separator.
+---Restore the sidebar's width and fixed setting after creating or moving padding.
+---@generic T
+---@param anchor? integer
+---@param action fun(): T
+---@return T
+local function with_split_room(anchor, action)
+  local width = anchor and vim.api.nvim_win_get_width(anchor) or nil
+  local fixed = anchor and vim.wo[anchor].winfixwidth or false
+  local ok, result = xpcall(function()
+    if anchor then
+      vim.wo[anchor].winfixwidth = false
+      local needed = 2 * math.max(1, vim.o.winminwidth) + 1
+      if vim.api.nvim_win_get_width(anchor) < needed then
+        vim.api.nvim_win_set_width(anchor, needed)
+      end
+    end
+    return action()
+  end, debug.traceback)
+  local restored, restore_err = xpcall(function()
+    if anchor and valid(anchor) then
+      vim.wo[anchor].winfixwidth = fixed
+      if vim.api.nvim_win_get_width(anchor) ~= width then
+        vim.api.nvim_win_set_width(anchor, assert(width))
+      end
+    end
+  end, debug.traceback)
+  if not ok then
+    if not restored then
+      result = tostring(result)
+        .. "\ncenterish: sidebar restoration also failed:\n"
+        .. tostring(restore_err)
+    end
+    error(result)
+  end
+  if not restored then
+    error(restore_err)
+  end
+  return result
+end
+
 ---Create a named scratch pad and register it with the tab's state.
 ---Start at the minimum allowed width; layout application sizes it afterwards.
 ---@param state centerish.PaddingState
@@ -177,21 +218,13 @@ end
 local function create_padding(state, side, sidebars)
   local anchor, split = padding_position(side, sidebars)
   local buf = vim.api.nvim_create_buf(false, true)
-  local fixed = anchor and vim.wo[anchor].winfixwidth or false
-
-  if anchor then
-    vim.wo[anchor].winfixwidth = false
-  end
-
-  local ok, win = pcall(vim.api.nvim_open_win, buf, false, {
-    split = split,
-    win = anchor or -1,
-    width = math.max(1, vim.o.winminwidth),
-  })
-
-  if anchor then
-    vim.wo[anchor].winfixwidth = fixed
-  end
+  local ok, win = pcall(with_split_room, anchor, function()
+    return vim.api.nvim_open_win(buf, false, {
+      split = split,
+      win = anchor or -1,
+      width = math.max(1, vim.o.winminwidth),
+    })
+  end)
 
   if not ok then
     vim.api.nvim_buf_delete(buf, { force = true })
@@ -206,6 +239,15 @@ local function create_padding(state, side, sidebars)
   end)
 
   return pad
+end
+
+---@param widths centerish.WidthMap
+local function restore_sidebars(widths)
+  for win, width in pairs(widths) do
+    if valid(win) and vim.api.nvim_win_get_width(win) ~= width then
+      vim.api.nvim_win_set_width(win, width)
+    end
+  end
 end
 
 ---Make owned padding match the requested spans and restore sidebar widths.
@@ -228,6 +270,10 @@ function M.apply(state, spans, sidebars, widths)
     end
   end
 
+  -- A full-width editor request may have clipped a sidebar below the width
+  -- needed to split beside it. Restore the anchor before creating padding.
+  restore_sidebars(widths)
+
   for _, side in ipairs({ "left", "right" }) do
     if spans[side] > 0 then
       local pad = state.pads[side]
@@ -236,30 +282,18 @@ function M.apply(state, spans, sidebars, widths)
         create_padding(state, side, sidebars)
       elseif not positioned(pad, side, sidebars) then
         local anchor, split = padding_position(side, sidebars)
-        local fixed = anchor and vim.wo[anchor].winfixwidth or false
-        if anchor then
-          vim.wo[anchor].winfixwidth = false
-        end
-        local ok, err = pcall(vim.api.nvim_win_set_config, pad.win, {
-          split = split,
-          win = anchor or -1,
-          width = math.max(1, vim.o.winminwidth),
-        })
-        if anchor then
-          vim.wo[anchor].winfixwidth = fixed
-        end
-        if not ok then
-          error(err)
-        end
+        with_split_room(anchor, function()
+          return vim.api.nvim_win_set_config(pad.win, {
+            split = split,
+            win = anchor or -1,
+            width = math.max(1, vim.o.winminwidth),
+          })
+        end)
       end
     end
   end
 
-  for win, width in pairs(widths) do
-    if valid(win) and vim.api.nvim_win_get_width(win) ~= width then
-      vim.api.nvim_win_set_width(win, width)
-    end
-  end
+  restore_sidebars(widths)
 
   for _, side in ipairs({ "right", "left" }) do
     local pad = state.pads[side]

@@ -19,6 +19,8 @@ local function settle()
   vim.wait(60, function()
     return false
   end)
+  -- Model returning to input after the scheduled callbacks have finished.
+  vim.api.nvim_exec_autocmds("SafeState", {})
   assert(vim.v.errmsg == "", vim.v.errmsg)
 end
 
@@ -94,6 +96,14 @@ local tests = {}
 
 tests["manual keyboard and mouse resizing keeps the chosen edges"] = function()
   dofile("tests/resize.lua")()
+end
+
+tests["sidebar sizing survives native and scheduled layout changes"] = function()
+  dofile("tests/terminal_resize.lua")()
+end
+
+tests["padding beside narrow sidebars survives resizing and failed placement"] = function()
+  dofile("tests/narrow_sidebar.lua")()
 end
 
 tests["adaptive growth follows completion input and automatic focus resizing"] = function()
@@ -556,6 +566,166 @@ tests["enable with an existing tree preserves its identity and width"] = functio
   equal(vim.api.nvim_win_get_width(tree), 20)
   equal(col(editor), 80)
   equal(vim.api.nvim_win_get_width(editor), 80)
+end
+
+tests["sidebars without width preservation accept file-switch resizing"] = function()
+  for _, side in ipairs({ "left", "right" }) do
+    for _, setting in ipairs({ side, { side = side }, { side = side, preserve_width = false } }) do
+      local editor = reset({
+        sidebars = {
+          ["fixed-sidebar"] = { side = "left", preserve_width = true },
+          ["test-sidebar"] = setting,
+        },
+      })
+      local fixed = sidebar("left", "fixed-sidebar")
+      local tree = sidebar(side, "test-sidebar")
+      vim.api.nvim_win_set_width(fixed, 20)
+      vim.api.nvim_win_set_width(tree, 20)
+      centerish.enable()
+      settle()
+
+      for _, width in ipairs({ 40, 15 }) do
+        local buf = vim.api.nvim_create_buf(false, false)
+        vim.api.nvim_create_autocmd("BufWinEnter", {
+          buffer = buf,
+          once = true,
+          callback = function()
+            vim.api.nvim_win_set_width(tree, width)
+          end,
+        })
+        vim.api.nvim_win_set_buf(editor, buf)
+        settle()
+
+        equal(vim.api.nvim_win_get_width(tree), width)
+        equal(vim.api.nvim_win_get_width(fixed), 20)
+        equal(vim.api.nvim_win_get_width(editor), 80)
+      end
+    end
+  end
+end
+
+tests["sidebar options reject invalid sides and width preservation"] = function()
+  reset()
+  for _, setting in ipairs({
+    true,
+    {},
+    { side = "middle" },
+    { side = false },
+    { side = "left", preserve_width = 0 },
+    { side = "right", preserve_width = "true" },
+  }) do
+    local ok, err = pcall(centerish.setup, { sidebars = { ["test-sidebar"] = setting } })
+    equal(ok, false)
+    assert(tostring(err):find("sidebar", 1, true))
+  end
+end
+
+tests["sidebars keep requested widths across file and split changes"] = function()
+  for _, preserve in ipairs({ false, true }) do
+    for _, ea in ipairs({ false, true }) do
+      for _, close_left in ipairs({ false, true }) do
+        local left = reset({
+          width = 120,
+          min_padding_width = 20,
+          sidebars = {
+            ["test-sidebar"] = preserve and { side = "left", preserve_width = true } or "left",
+          },
+        })
+        vim.o.columns = 400
+        vim.o.equalalways = ea
+        vim.cmd("redraw")
+        vim.cmd("rightbelow vnew")
+        local right = vim.api.nvim_get_current_win()
+        local tree = sidebar("left", "test-sidebar")
+        vim.api.nvim_win_set_width(tree, 40)
+        local keep = close_left and right or left
+        local close = close_left and left or right
+        vim.api.nvim_set_current_win(keep)
+        centerish.enable()
+        settle()
+        equal(vim.api.nvim_win_get_width(tree), 40)
+
+        for _ = 1, 2 do
+          -- CodeDiff loads the next file before closing the absent side, then
+          -- sizes the remaining pane against the full tab width.
+          vim.api.nvim_win_set_buf(keep, vim.api.nvim_create_buf(false, false))
+          vim.api.nvim_win_close(close, true)
+          vim.api.nvim_win_set_width(tree, 40)
+          vim.api.nvim_win_set_width(keep, vim.o.columns - 41)
+          settle()
+
+          equal(vim.api.nvim_win_get_width(tree), 40)
+          equal(vim.api.nvim_win_get_width(keep), 120)
+          equal(vim.api.nvim_get_current_win(), keep)
+          equal(vim.wo[tree].winfixwidth, true)
+
+          -- Consecutive added files reuse the same single pane.
+          for _ = 1, 2 do
+            vim.api.nvim_win_set_buf(keep, vim.api.nvim_create_buf(false, false))
+            vim.api.nvim_win_set_width(tree, 40)
+            vim.api.nvim_win_set_width(keep, vim.o.columns - 41)
+            settle()
+
+            equal(vim.api.nvim_win_get_width(tree), 40)
+            equal(vim.api.nvim_win_get_width(keep), 120)
+          end
+
+          vim.cmd(close_left and "leftabove vnew" or "rightbelow vnew")
+          close = vim.api.nvim_get_current_win()
+          local available = vim.api.nvim_win_get_width(keep) + vim.api.nvim_win_get_width(close)
+          vim.api.nvim_win_set_width(keep, math.floor(available / 2))
+          vim.api.nvim_win_set_width(close, available - math.floor(available / 2))
+          vim.api.nvim_win_set_width(tree, 40)
+          vim.api.nvim_set_current_win(keep)
+          settle()
+
+          equal(vim.api.nvim_win_get_width(tree), 40)
+          equal(vim.api.nvim_win_get_width(keep) + vim.api.nvim_win_get_width(close), 240)
+        end
+
+        vim.api.nvim_win_set_width(tree, 50)
+        vim.api.nvim_exec_autocmds("WinResized", {})
+        settle()
+        equal(vim.api.nvim_win_get_width(tree), 50)
+        vim.api.nvim_win_set_buf(keep, vim.api.nvim_create_buf(false, false))
+        vim.api.nvim_win_set_width(tree, 40)
+        settle()
+        equal(vim.api.nvim_win_get_width(tree), preserve and 50 or 40)
+      end
+    end
+  end
+end
+
+tests["buffer switches beside a sidebar keep unequal editor proportions"] = function()
+  local left = reset({ min_padding_width = 0 })
+  vim.o.columns = 400
+  vim.o.equalalways = false
+  vim.cmd("rightbelow vnew")
+  local right = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_width(left, 60)
+  local tree = sidebar("left")
+  centerish.enable()
+  settle()
+
+  local widths = { vim.api.nvim_win_get_width(left), vim.api.nvim_win_get_width(right) }
+  assert(widths[1] ~= widths[2])
+  for _, win in ipairs({ left, right }) do
+    vim.api.nvim_win_set_buf(win, vim.api.nvim_create_buf(false, false))
+    settle()
+    equal({ vim.api.nvim_win_get_width(left), vim.api.nvim_win_get_width(right) }, widths)
+    equal(vim.api.nvim_win_get_width(tree), 20)
+    equal(vim.api.nvim_get_current_win(), right)
+  end
+end
+
+tests["buffer switches without sidebars retain explicit Lua editor resizing"] = function()
+  local editor = reset({ min_padding_width = 0 })
+  centerish.enable()
+  settle()
+  vim.api.nvim_win_set_width(editor, 90)
+  vim.api.nvim_win_set_buf(editor, vim.api.nvim_create_buf(true, false))
+  settle()
+  equal(vim.api.nvim_win_get_width(editor), 90)
 end
 
 tests["right sidebar consumes right padding only"] = function()
