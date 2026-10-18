@@ -212,14 +212,48 @@ A sidebar that fits within its margin leaves the editing area in place. A
 wider sidebar consumes padding on the other side before reducing the editing
 area below its target. Floating windows are excluded from width calculations.
 
-Navigation and closing ~
+Window commands ~                                *centerish-window-commands*
 
 Window navigation skips padding. Moving into padding at an outer edge wraps
 across the tab, including with CTRL-W h and CTRL-W l. Sidebars remain
 accessible.
 
+Keyboard exchanges, CTRL-W x and CTRL-W CTRL-X, and rotations, CTRL-W r,
+CTRL-W CTRL-R, and CTRL-W R, exclude padding from the current row or column.
+Counts refer to those same windows, including sidebars.
+
+Exchanges and rotations also work in Visual mode and temporary Normal mode
+entered with CTRL-O from Insert mode. Exchanges between windows showing the
+same buffer retain the Visual selection. These operations preserve the
+previous window for CTRL-W p.
+
 Closing all editing windows in an enabled tab removes its padding and disables
 centering for that tab.
+
+Window mappings ~                                *centerish-window-mappings*
+
+Centerish installs CTRL-W and CTRL-SHIFT-W prefix mappings in Normal and Visual
+mode when no global mapping exists for that prefix. Existing buffer-local
+mappings and mappings for specific commands take precedence. The prefix is also
+available as <Plug>(CenterishWindowCommand) for custom mappings.
+
+Mappings that emit CTRL-W must allow remapping for padding correction and
+manual resize tracking. With vim.keymap.set(), pass { remap = true }: >lua
+
+    vim.keymap.set("n", "<leader>wx", "<C-w>x", { remap = true })
+<
+Alternatively, use the <Plug>(CenterishWindowCommand) prefix in the mapping's
+right-hand side. Non-recursive CTRL-W resize mappings can have their width
+changes reverted by centering.
+
+The following use native window handling, which includes padding:
+
+    - Non-recursive mappings that emit CTRL-W.
+    - Ex window commands, whether typed as :wincmd, called with
+      vim.cmd('wincmd ...'), or used in <Cmd>wincmd ...<CR> mappings.
+    - CTRL-W input with 'langmap' set or while running in the sandbox.
+    - Rotations evaluated while text is locked, such as in a statusline
+      expression.
 
 ==============================================================================
 ADAPTIVE WIDTH                                            *centerish-adaptive*
@@ -281,9 +315,9 @@ LUA API                                                        *centerish-api*
 require("centerish").setup(opts)                           *centerish.setup()*
     Configure Centerish with an optional options table.
     See |centerish-config|.
-    Setup does not enable centering or create mappings. An enabled current
-    tab is refreshed; other enabled tabs use the configuration on their next
-    refresh, including when you enter them.
+    Setup installs the mappings in |centerish-window-mappings| without enabling
+    centering. An enabled current tab is refreshed; other enabled tabs use the
+    configuration on their next refresh, including when you enter them.
 
 require("centerish").enable()                             *centerish.enable()*
     Enable or update the current tab without resetting adaptive growth.

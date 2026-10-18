@@ -124,6 +124,60 @@ function M.editors(node, editors)
   return #children > 0 and { node[1], children } or nil
 end
 
+---@alias centerish.ReorderCommand "x"|"r"|"R"
+
+---Apply native exchange or rotation semantics to a row or column.
+---Keep split branches in the count; exchanges cannot target them and rotations cannot move them.
+---@param node vim.fn.winlayout.branch
+---@param win integer Current leaf window.
+---@param command centerish.ReorderCommand
+---@param count integer Zero means no explicit count.
+---@return vim.fn.winlayout.branch
+---@return integer focused
+function M.reorder(node, win, command, count)
+  local result = vim.deepcopy(node)
+  local children, index = result[2], nil
+
+  for i, child in ipairs(children) do
+    if child[1] == "leaf" and child[2] == win then
+      index = i
+      break
+    end
+  end
+
+  if not index or #children < 2 then
+    return result, win
+  end
+
+  if command == "x" then
+    local target = count > 0 and count or (children[index + 1] and index + 1 or index - 1)
+    if children[target] and children[target][1] == "leaf" then
+      local focused = children[target][2] --[[@as integer]]
+      children[index], children[target] = children[target], children[index]
+      return result, focused
+    end
+  else
+    for _, child in ipairs(children) do
+      if child[1] ~= "leaf" then
+        return result, win
+      end
+    end
+
+    local shift = math.max(1, count) % #children
+    if command == "R" then
+      shift = -shift
+    end
+
+    local rotated = {}
+    for i, child in ipairs(children) do
+      rotated[(i - 1 + shift) % #children + 1] = child
+    end
+    result[2] = rotated
+  end
+
+  return result, win
+end
+
 ---Allocate the available editor span while preserving existing split proportions.
 ---Respect fixed and minimum widths when space permits; stacked editors receive
 ---the same span. Return a map of allocated widths for each editor window.

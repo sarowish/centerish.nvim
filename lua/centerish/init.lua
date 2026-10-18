@@ -8,6 +8,7 @@ local M = {}
 
 ---@alias centerish.WindowSet table<integer, true>
 ---@alias centerish.WidthMap table<integer, integer>
+---@alias centerish.FlatRow { [1]: "row", [2]: vim.fn.winlayout.leaf[] }
 
 local config = configuration.resolve()
 
@@ -277,6 +278,147 @@ local function remember_resize(state, bounds, spans, target)
     or (state.adjustment and state.target ~= target)
   then
     state.adjustment = { left = actual.left - spans.left, right = actual.right - spans.right }
+  end
+end
+
+---Reorder a flat row without entering editors or disturbing their viewports.
+---@param desired centerish.FlatRow
+local function apply_reorder(desired)
+  if vim.deep_equal(vim.fn.winlayout(), desired) then
+    return
+  end
+
+  local widths, fixed, helpers = {}, {}, {}
+  local splitkeep = vim.o.splitkeep
+
+  local function set_options(win, options)
+    for name, value in pairs(options) do
+      vim.cmd(
+        "noautocmd call nvim_set_option_value("
+          .. vim.fn.string(name)
+          .. ", "
+          .. vim.fn.string(value)
+          .. ", {'win': "
+          .. win
+          .. "})"
+      )
+    end
+  end
+
+  for _, child in ipairs(desired[2]) do
+    local win = child[2]
+    widths[win] = vim.api.nvim_win_get_width(win)
+    fixed[win] = { winfixwidth = vim.wo[win].winfixwidth, winfixheight = vim.wo[win].winfixheight }
+  end
+
+  -- Split moves temporarily redistribute widths. Keep the top line until the
+  -- original dimensions return, without resolving pending curswant or applying
+  -- old screen coordinates from earlier tabline or winbar changes.
+  local ok, err = xpcall(function()
+    -- libvterm resizes immediately, even before redraw. Keep a full-size view
+    -- of each terminal so temporary narrowing cannot discard its output.
+    local protected = {}
+    for _, child in ipairs(desired[2]) do
+      local buf = vim.api.nvim_win_get_buf(child[2])
+      if vim.bo[buf].buftype == "terminal" and not protected[buf] then
+        protected[buf] = true
+        local width, height = 0, 0
+        for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+          local info = vim.fn.getwininfo(win)[1]
+          width = math.max(width, info.width - info.textoff)
+          height = math.max(height, info.height)
+        end
+
+        if width > 0 and height > 0 then
+          -- Opening from a terminal copies its live cursor into buffer history.
+          -- Start from padding, then load the saved terminal mark and options
+          -- natively so closing the helper preserves future buffer restoration.
+          local state = tabs[vim.api.nvim_get_current_tabpage()]
+          local source
+          for _, leaf in ipairs(desired[2]) do
+            if padding.is_owned(state, leaf[2]) then
+              source = leaf[2]
+              break
+            end
+          end
+
+          local helper = vim.api.nvim_win_call(source, function()
+            return vim.api.nvim_open_win(vim.api.nvim_win_get_buf(source), false, {
+              relative = "editor",
+              row = 0,
+              col = 0,
+              width = width,
+              height = height,
+              border = "none",
+              focusable = false,
+              zindex = 1,
+              noautocmd = true,
+            })
+          end)
+          helpers[#helpers + 1] = helper
+          vim.cmd("noautocmd keepalt call win_execute(" .. helper .. ", 'buffer " .. buf .. "')")
+
+          local info = vim.fn.getwininfo(helper)[1]
+          vim.cmd(
+            "noautocmd call nvim_win_set_config("
+              .. helper
+              .. ", {'width': "
+              .. (width + info.textoff)
+              .. ", 'height': "
+              .. (height + info.winbar)
+              .. "})"
+          )
+        end
+      end
+    end
+
+    vim.cmd("noautocmd set splitkeep=topline")
+    for win in pairs(fixed) do
+      set_options(win, { winfixwidth = false, winfixheight = true })
+    end
+
+    for index, child in ipairs(desired[2]) do
+      local current = vim.fn.winlayout()[2][index][2]
+      if current ~= child[2] then
+        vim.cmd(
+          "noautocmd call nvim_win_set_config("
+            .. child[2]
+            .. ", {'split': 'left', 'win': "
+            .. current
+            .. ", 'width': "
+            .. widths[child[2]]
+            .. "})"
+        )
+      end
+    end
+
+    for _, child in ipairs(desired[2]) do
+      local win = child[2]
+      vim.cmd("noautocmd call nvim_win_set_width(" .. win .. ", " .. widths[win] .. ")")
+      set_options(win, { winfixwidth = true, winfixheight = true })
+    end
+  end, debug.traceback)
+
+  local restored, restore_err = xpcall(function()
+    for _, helper in ipairs(helpers) do
+      if valid(helper) then
+        vim.cmd("noautocmd call nvim_win_close(" .. helper .. ", v:true)")
+      end
+    end
+
+    for win, options in pairs(fixed) do
+      if valid(win) then
+        set_options(win, options)
+      end
+    end
+  end, debug.traceback)
+  vim.cmd("noautocmd set splitkeep=" .. splitkeep)
+
+  if not ok then
+    error(err)
+  end
+  if not restored then
+    error(restore_err)
   end
 end
 
@@ -697,10 +839,278 @@ local function remember_focus(state, win)
   end
 end
 
+---Find the current window's root-row siblings, excluding owned padding.
+---Nested rows cannot move our full-height padding and need no correction.
+---@return centerish.TabState? state
+---@return vim.fn.winlayout.branch? tree
+---@return (vim.fn.winlayout.leaf|vim.fn.winlayout.branch)[]? siblings
+---@return integer? win
+local function reorder_context()
+  local state = tabs[vim.api.nvim_get_current_tabpage()]
+  if busy or dragging or session_loading() or not state or state.restore_quit then
+    return
+  end
+
+  local tree = vim.fn.winlayout()
+  if tree[1] ~= "row" then
+    return
+  end
+
+  ---@cast tree vim.fn.winlayout.branch
+  local win = vim.api.nvim_get_current_win()
+  local found = false
+  ---@type (vim.fn.winlayout.leaf|vim.fn.winlayout.branch)[]
+  local siblings = {}
+  for _, child in ipairs(tree[2]) do
+    local leaf = child[1] == "leaf" and child --[[@as vim.fn.winlayout.leaf]]
+    if not leaf or not padding.is_owned(state, leaf[2]) then
+      siblings[#siblings + 1] = child
+      if child[1] == "leaf" and child[2] == win then
+        found = true
+      end
+    end
+  end
+
+  if not found or #siblings == #tree[2] then
+    return
+  end
+  return state, tree, siblings, win
+end
+
+---Run native Visual exit and its callbacks before inspecting the rotation context.
+---@param command "r"|"R"
+---@param count integer
+local function rotate(command, count)
+  -- Callback errors can be reported after native rotation has already run.
+  -- Finish its correction before reporting the error, without leaving a plan.
+  local ok, err = pcall(vim.api.nvim_cmd, { cmd = "wincmd", args = { command } }, {})
+
+  local function report_error()
+    if not ok then
+      local message = err:gsub("^Vim:", "")
+      -- Neovim 0.10 lacks nvim_echo's err option.
+      ---@diagnostic disable-next-line: deprecated
+      vim.api.nvim_err_writeln(message)
+      vim.v.errmsg = message
+    end
+  end
+
+  local state, tree, _, win = reorder_context()
+  if state then
+    -- Native rotation is allowed during textlock, but its padding repair needs
+    -- window APIs. Probe after the prefix expression's own lock has ended.
+    local message = vim.v.errmsg
+    local allowed = pcall(vim.api.nvim_set_current_win, win)
+    vim.v.errmsg = message
+    if not allowed then
+      state = nil
+    end
+  end
+
+  if not state or not tree or not win then
+    -- A callback may have moved to another tab or split, or evaluation may
+    -- forbid correction. Finish the native count in the current row or column.
+    local current = vim.api.nvim_get_current_win()
+
+    local function sibling_count(node)
+      if node[1] == "leaf" then
+        return
+      end
+
+      local contains = false
+      for _, child in ipairs(node[2]) do
+        if child[1] == "leaf" and child[2] == current then
+          contains = true
+        end
+      end
+
+      if contains then
+        for _, child in ipairs(node[2]) do
+          if child[1] ~= "leaf" then
+            return
+          end
+        end
+        return #node[2]
+      end
+
+      for _, child in ipairs(node[2]) do
+        local found = sibling_count(child)
+        if found then
+          return found
+        end
+      end
+    end
+
+    local remaining = (math.max(1, count) - 1) % (sibling_count(vim.fn.winlayout()) or 1)
+    if remaining > 0 then
+      vim.cmd(remaining .. "wincmd " .. command)
+    end
+    report_error()
+    return
+  end
+
+  for _, child in ipairs(tree[2]) do
+    if child[1] ~= "leaf" then
+      report_error()
+      return
+    end
+  end
+
+  -- Undo the one native rotation in the plan, then rotate only non-padding
+  -- siblings by the full requested count. No plan survives a failed command.
+  local desired = layout.reorder(tree, win, command == "r" and "R" or "r", 1)
+  ---@cast desired centerish.FlatRow
+
+  local siblings = {}
+  for _, child in ipairs(desired[2]) do
+    if not padding.is_owned(state, child[2]) then
+      siblings[#siblings + 1] = child
+    end
+  end
+
+  local ordered = layout.reorder({ "row", siblings }, win, command, count)
+  ---@cast ordered centerish.FlatRow
+
+  local index = 0
+  for i, child in ipairs(desired[2]) do
+    if not padding.is_owned(state, child[2]) then
+      index = index + 1
+      desired[2][i] = ordered[2][index]
+    end
+  end
+
+  transaction(function()
+    apply_reorder(desired)
+  end)
+  refresh(vim.api.nvim_get_current_tabpage())
+  report_error()
+end
+
 ---Track native resize input and defer structural layout changes across separator drags.
 local function install_resize_input()
-  local window_command = false
+  local window_command, prefix_key = false, false
   local control_w = vim.keycode("<C-W>")
+  local modifier_prefix = vim.keycode("<M-x>"):sub(1, 2)
+  local plug = "<Plug>(CenterishWindowCommand)"
+  local rotate_plug = "<Plug>(CenterishRotate)"
+
+  ---@type { command: "r"|"R", count: integer }?
+  local rotation
+
+  ---@type table<string, "r"|"R">
+  local rotations = {
+    r = "r",
+    [vim.keycode("<C-R>")] = "r",
+    R = "R",
+  }
+
+  local function read_window_key()
+    local key = vim.fn.getcharstr()
+    -- Native window commands use the character and ignore its modifier prefix.
+    return key, key:sub(1, 2) == modifier_prefix and key:sub(4) or key
+  end
+
+  local function can_execute_commands()
+    -- The sandbox allows native CTRL-W input but rejects Ex execution. An empty
+    -- command list checks permission; silent! may set errmsg instead of throwing.
+    local message = vim.v.errmsg
+    local ok, result = pcall(vim.fn.execute, {})
+    vim.v.errmsg = message
+    return ok and type(result) == "string"
+  end
+
+  for _, mode in ipairs({ "n", "x" }) do
+    vim.keymap.set(mode, rotate_plug, function()
+      local action = rotation
+      rotation = nil
+      if action then
+        -- Keep native rotation and its padding repair in one command, including
+        -- temporary Normal mode, before the next queued key can inspect the layout.
+        rotate(action.command, action.count)
+      end
+    end, { desc = "Centerish native rotation" })
+
+    vim.keymap.set(mode, plug, function()
+      window_command, prefix_key = false, false
+      local digits, key = "", ""
+
+      -- Keep language translation in Neovim's input parser, including its
+      -- distinction between typed characters and characters emitted by mappings.
+      if vim.o.langmap == "" and reorder_context() then
+        local initial = vim.v.count
+        local suffix = 0
+        local delete, keypad_delete = vim.keycode("<Del>"), vim.keycode("<kDel>")
+        local command
+        key, command = read_window_key()
+        while
+          command:match("^[1-9]$")
+          or suffix > 0 and (command == "0" or command == delete or command == keypad_delete)
+        do
+          if command == delete or command == keypad_delete then
+            suffix = math.floor(suffix / 10)
+          else
+            suffix = math.min(999999999, suffix * 10 + tonumber(command))
+          end
+          key, command = read_window_key()
+        end
+        digits = suffix > 0 and tostring(suffix) or ""
+
+        if command == "x" or command == vim.keycode("<C-X>") or rotations[command] then
+          -- Waiting for input can run timers that change the active tab or layout.
+          local state, tree, siblings, win = reorder_context()
+          if state and tree and siblings and win and can_execute_commands() then
+            local count = math.max(initial, suffix)
+            if initial > 0 and suffix > 0 then
+              count = initial >= math.floor(999999999 / suffix) and 999999999 or initial * suffix
+            end
+
+            -- Give Neovim's count parser the effective count so callbacks see
+            -- native v:count/v:count1, including counts entered after CTRL-W.
+            local count_prefix = string.rep(
+              vim.keycode("<Del>"),
+              initial > 0 and #tostring(initial) or 0
+            ) .. (count > 0 and tostring(count) or "")
+
+            if rotations[command] then
+              local flat = vim.iter(tree[2]):all(function(child)
+                return child[1] == "leaf"
+              end)
+              if flat then
+                rotation = { command = rotations[command], count = count }
+                return count_prefix .. vim.keycode(rotate_plug)
+              end
+            else
+              local _, target = layout.reorder({ "row", siblings }, win, "x", count)
+              for index, child in ipairs(tree[2]) do
+                if child[1] == "leaf" and child[2] == target then
+                  -- Execute the exchange once, at its physical sibling address.
+                  -- Native code retains Visual history, cursor state and callback focus.
+                  return count_prefix
+                    .. vim.keycode("<Cmd>")
+                    .. index
+                    .. "wincmd x"
+                    .. vim.keycode("<CR>")
+                end
+              end
+            end
+          end
+        end
+      end
+
+      window_command, prefix_key = true, true
+      return control_w .. digits .. key
+    end, { expr = true, replace_keycodes = false, desc = "Centerish native window command" })
+
+    for _, prefix in ipairs({ "<C-W>", "<C-S-W>" }) do
+      local mapped = vim.iter(vim.api.nvim_get_keymap(mode)):any(function(mapping)
+        return vim.keycode(mapping.lhs) == vim.keycode(prefix)
+      end)
+      if not mapped then
+        vim.keymap.set(mode, prefix, plug, { remap = true, desc = "Centerish window prefix" })
+      end
+    end
+  end
+
   vim.on_key(function(key)
     local name = #key > 1 and vim.fn.keytrans(key) or key
     if name:match("^<[%w%-]*LeftMouse>$") then
@@ -719,13 +1129,18 @@ local function install_resize_input()
       schedule_updates()
     end
 
+    if key == control_w and prefix_key then
+      prefix_key = false
+      return
+    end
+
     if window_command and key:match("^%d$") then
       return
     end
     if window_command and (key == ">" or key == "<" or key == "|" or key == "=") then
       mark_manual_resize(vim.api.nvim_get_current_win())
     end
-    window_command = key == control_w
+    window_command = false
   end, vim.api.nvim_create_namespace("centerish.input"))
 
   vim.api.nvim_create_autocmd("CmdlineLeave", {

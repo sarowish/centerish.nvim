@@ -60,9 +60,15 @@ also available when restoring sessions.
 | `:CenterishDisable` | Remove the current tab's padding and reset adaptive growth. |
 | `:CenterishToggle`  | Switch between those two states.                            |
 
-Each tab is enabled independently. New tabs start disabled. Use your usual
-split and window commands; navigation skips padding and wraps when moving
-into padding at an outer edge.
+Each tab is enabled independently. New tabs start disabled. Window navigation
+skips padding and wraps when moving into padding at an outer edge. Exchanges
+with `<C-w>x` and rotations with `<C-w>r` or `<C-w>R` also skip padding,
+including when given a count.
+
+Setup installs window prefix mappings. For custom mappings that emit `<C-w>`,
+pass `{ remap = true }` to `vim.keymap.set()` for padding correction and manual
+resize tracking. See the [window mapping reference](doc/centerish.txt) or run
+`:help centerish-window-mappings` for alternatives and compatibility details.
 
 Disabling keeps your editing windows open. Their sizes from before centering
 are not restored.

@@ -94,6 +94,30 @@ end
 
 local tests = {}
 
+tests["window exchanges and rotations skip padding and preserve native behavior"] = function()
+  dofile("tests/reorder.lua")()
+end
+
+tests["window reordering preserves native callback behavior"] = function()
+  dofile("tests/reorder_callbacks.lua")()
+end
+
+tests["window reordering preserves prompt Insert resumption"] = function()
+  dofile("tests/reorder_prompt.lua")()
+end
+
+tests["window commands preserve native behavior during restricted evaluation"] = function()
+  dofile("tests/reorder_sandbox.lua")()
+end
+
+tests["window rotations preserve views and directory history"] = function()
+  dofile("tests/reorder_views.lua")()
+end
+
+tests["window rotations preserve terminal output"] = function()
+  dofile("tests/reorder_terminal.lua")()
+end
+
 tests["manual keyboard and mouse resizing keeps the chosen edges"] = function()
   dofile("tests/resize.lua")()
 end
