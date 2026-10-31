@@ -49,6 +49,14 @@ local config = configuration.resolve()
 
 ---@type table<integer, centerish.TabState>
 local tabs = {}
+---@type table<integer, true>
+local auto_tabs = {}
+---@type table<integer, true>
+local manual_tabs = {}
+local known_tabs = vim.api.nvim_list_tabpages()
+local auto_pending = false
+---@type fun()
+local schedule_auto_enable
 local busy, pending = false, false
 local pending_session = false
 local dragging = false
@@ -661,6 +669,7 @@ local function transaction(action)
   busy = false
   schedule_requests()
   schedule_updates()
+  schedule_auto_enable()
 
   if not ok then
     if not restored then
@@ -812,6 +821,7 @@ local function schedule(event)
       queue_refresh()
     end
   end
+  schedule_auto_enable()
 end
 
 ---Distinguish explicit editor resizing from sidebar width changes and focus sizing.
@@ -1127,6 +1137,7 @@ local function install_resize_input()
       queue_refresh()
       schedule_requests()
       schedule_updates()
+      schedule_auto_enable()
     end
 
     if key == control_w and prefix_key then
@@ -1171,8 +1182,76 @@ local function install_events()
   end
 
   group = vim.api.nvim_create_augroup("centerish", { clear = true })
+  known_tabs = vim.api.nvim_list_tabpages()
   install_resize_input()
   install_width_observer()
+
+  vim.api.nvim_create_autocmd("WinNew", {
+    group = group,
+    callback = function()
+      local live = vim.api.nvim_list_tabpages()
+      local added = vim.tbl_filter(function(tab)
+        return not vim.tbl_contains(known_tabs, tab)
+      end, live)
+      known_tabs = live
+      if
+        not config.autocmds.enable_on_tab
+        or busy
+        or vim.g.SessionLoad
+        or vim.v.vim_did_enter == 0
+      then
+        return
+      end
+      -- Earlier hooks can create more tabs or change focus. Skip ambiguous
+      -- origins instead of guessing which tab belongs to this event.
+      local created = #added == 1 and added[1] or nil
+      if
+        created
+        and created == vim.api.nvim_get_current_tabpage()
+        and #vim.api.nvim_tabpage_list_wins(created) == 1
+        and not manual_tabs[created]
+      then
+        auto_tabs[created] = true
+        schedule_auto_enable()
+      end
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("VimEnter", {
+    group = group,
+    callback = function()
+      if session_loading() or session.was_loaded() then
+        return
+      end
+      if config.autocmds.enable_on_startup then
+        local tab = vim.api.nvim_get_current_tabpage()
+        if not manual_tabs[tab] then
+          auto_tabs[tab] = true
+          -- Let startup hooks draw their dashboards before the first redraw.
+          -- Restore the intro flag synchronously so later callbacks own their changes.
+          vim.api.nvim_create_autocmd("SafeState", {
+            group = group,
+            once = true,
+            callback = function()
+              if
+                (auto_tabs[tab] or tabs[tab])
+                and not session.was_loaded()
+                and not vim.o.shortmess:find("I", 1, true)
+              then
+                vim.opt.shortmess:append("I")
+                local ok, err = pcall(vim.cmd.redraw)
+                vim.opt.shortmess:remove("I")
+                if not ok then
+                  error(err)
+                end
+              end
+            end,
+          })
+        end
+      end
+      schedule_auto_enable()
+    end,
+  })
 
   vim.api.nvim_create_autocmd("OptionSet", {
     group = group,
@@ -1298,6 +1377,7 @@ local function install_events()
   vim.api.nvim_create_autocmd("WinLeave", {
     group = group,
     callback = function()
+      known_tabs = vim.api.nvim_list_tabpages()
       local state = tabs[vim.api.nvim_get_current_tabpage()]
       if
         not busy
@@ -1319,6 +1399,9 @@ local function install_events()
   vim.api.nvim_create_autocmd("SafeState", {
     group = group,
     callback = function()
+      if not busy and not session_loading() then
+        known_tabs = vim.api.nvim_list_tabpages()
+      end
       local state = tabs[vim.api.nvim_get_current_tabpage()]
       if state and not vim.deep_equal(state.layout, vim.fn.winlayout()) then
         schedule()
@@ -1404,6 +1487,16 @@ local function install_events()
           tabs[tab] = nil
         end
       end
+      for tab in pairs(auto_tabs) do
+        if not vim.api.nvim_tabpage_is_valid(tab) then
+          auto_tabs[tab] = nil
+        end
+      end
+      for tab in pairs(manual_tabs) do
+        if not vim.api.nvim_tabpage_is_valid(tab) then
+          manual_tabs[tab] = nil
+        end
+      end
     end,
   })
 end
@@ -1412,6 +1505,8 @@ end
 ---Defer layout recovery until native window creation and session hooks finish.
 function M._restore_session()
   install_events()
+  auto_tabs = {}
+  manual_tabs = {}
   if pending_session then
     return
   end
@@ -1455,6 +1550,7 @@ function M._restore_session()
           end
         end
         tabs = restored
+        known_tabs = vim.api.nvim_list_tabpages()
         for tab, state in pairs(tabs) do
           tab_call(tab, function()
             update(state)
@@ -1465,6 +1561,7 @@ function M._restore_session()
     pending_session = false
     schedule_requests()
     schedule_updates()
+    schedule_auto_enable()
     if not ok then
       error(err)
     end
@@ -1472,20 +1569,12 @@ function M._restore_session()
   vim.schedule(restore)
 end
 
----Validate and replace the shared configuration, using defaults for omitted options.
----Schedule an update for the current tab if positioning is already enabled.
----@param opts? centerish.Config
-function M.setup(opts)
-  config = configuration.resolve(opts)
-  install_events()
-  queue_refresh()
-end
-
 ---Run a public operation in its originating tab, preserving the caller's focus.
 ---Queue requests during layout updates or behind earlier deferred requests.
 ---@param action fun(tab: integer)
-local function request(action)
-  local tab = vim.api.nvim_get_current_tabpage()
+---@param tab? integer Originating tab, defaulting to the current tab.
+local function request(action, tab)
+  tab = tab or vim.api.nvim_get_current_tabpage()
   if vim.g.SessionLoad and not pending_session then
     M._restore_session()
   end
@@ -1542,19 +1631,99 @@ local function disable(tab)
   end
 end
 
+---Check for an editing window that can trigger automatic activation.
+---@param tab integer Valid tabpage handle.
+---@return boolean
+local function can_auto_enable(tab)
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
+    local win_config = vim.api.nvim_win_get_config(win)
+    local filetype = vim.bo[vim.api.nvim_win_get_buf(win)].filetype
+    if
+      win_config.relative == ""
+      and not win_config.external
+      and not config.sidebars[filetype]
+      and not vim.tbl_contains(config.exclude_filetypes, filetype)
+    then
+      return true
+    end
+  end
+  return false
+end
+
+---Wait until a pending tab contains an ordinary window outside the excluded filetypes.
+---Run after startup and buffer callbacks, preserving focus if the user has changed tabs.
+schedule_auto_enable = function()
+  if
+    auto_pending
+    or busy
+    or dragging
+    or session_loading()
+    or vim.v.vim_did_enter == 0
+    or not next(auto_tabs)
+  then
+    return
+  end
+  auto_pending = true
+  vim.defer_fn(function()
+    auto_pending = false
+    if busy or dragging or session_loading() then
+      return
+    end
+    local configured = config
+    for tab in pairs(auto_tabs) do
+      if not vim.api.nvim_tabpage_is_valid(tab) or tabs[tab] then
+        auto_tabs[tab] = nil
+      elseif can_auto_enable(tab) then
+        request(function(origin)
+          if config == configured and auto_tabs[origin] and can_auto_enable(origin) then
+            auto_tabs[origin] = nil
+            enable(origin)
+          end
+        end, tab)
+      end
+    end
+  end, 0)
+end
+
+---Validate and replace the shared configuration, using defaults for omitted options.
+---Schedule automatic startup activation or refresh an already enabled current tab.
+---@param opts? centerish.Config
+function M.setup(opts)
+  config = configuration.resolve(opts)
+  auto_tabs = {}
+  manual_tabs = {}
+  install_events()
+  if
+    config.autocmds.enable_on_startup
+    and vim.v.vim_did_enter ~= 0
+    and not session_loading()
+    and not session.was_loaded()
+  then
+    auto_tabs[vim.api.nvim_get_current_tabpage()] = true
+    schedule_auto_enable()
+  end
+  queue_refresh()
+end
+
 ---Enable and refresh positioning in the current tab.
 ---Repeated calls preserve the tab's remembered adaptive growth.
 function M.enable()
+  manual_tabs[vim.api.nvim_get_current_tabpage()] = true
+  auto_tabs[vim.api.nvim_get_current_tabpage()] = nil
   request(enable)
 end
 
 ---Disable positioning in the current tab, removing owned padding and saved growth.
 function M.disable()
+  manual_tabs[vim.api.nvim_get_current_tabpage()] = true
+  auto_tabs[vim.api.nvim_get_current_tabpage()] = nil
   request(disable)
 end
 
 ---Toggle positioning in the current tab, resetting adaptive growth when disabling.
 function M.toggle()
+  manual_tabs[vim.api.nvim_get_current_tabpage()] = true
+  auto_tabs[vim.api.nvim_get_current_tabpage()] = nil
   request(function(tab)
     if tabs[tab] then
       disable(tab)

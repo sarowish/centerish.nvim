@@ -19,12 +19,18 @@ local M = {}
 ---@class centerish.ResolvedSidebarConfig: centerish.SidebarConfig
 ---@field preserve_width boolean
 
+---@class (exact) centerish.AutocmdConfig
+---@field enable_on_startup? boolean Enable after startup once an editing window is available. Defaults to false.
+---@field enable_on_tab? boolean Enable new tabs once an editing window is available. Defaults to false.
+
 ---@class (exact) centerish.Config
 ---@field width? integer Centered target width, including gutters. Defaults to 120.
 ---@field min_padding_width? integer Minimum padding width, excluding separators. Defaults to 10.
 ---@field padding? centerish.PaddingConfig
 ---@field sidebars? table<string, centerish.Side|centerish.SidebarConfig|false> Filetype settings; false disables recognition.
 ---@field adaptive? centerish.AdaptiveConfig
+---@field autocmds? centerish.AutocmdConfig
+---@field exclude_filetypes? string[] Filetypes that cannot trigger automatic activation.
 
 ---@class centerish.MergedConfig
 ---@field width integer
@@ -32,6 +38,8 @@ local M = {}
 ---@field padding { left: boolean, right: boolean }
 ---@field sidebars table<string, centerish.Side|centerish.SidebarConfig|false>
 ---@field adaptive { enabled: boolean, direction: centerish.GrowthDirection, max_width: integer }
+---@field autocmds { enable_on_startup: boolean, enable_on_tab: boolean }
+---@field exclude_filetypes string[]
 
 ---@class centerish.ResolvedConfig: centerish.MergedConfig
 ---@field sidebars table<string, centerish.ResolvedSidebarConfig|false>
@@ -43,6 +51,8 @@ local defaults = {
   padding = { left = true, right = true },
   sidebars = { NvimTree = "left", ["neo-tree"] = "left" },
   adaptive = { enabled = false, direction = "right", max_width = 160 },
+  autocmds = { enable_on_startup = false, enable_on_tab = false },
+  exclude_filetypes = { "alpha", "dashboard", "snacks_dashboard" },
 }
 
 ---Merge options with fresh defaults and validate the resolved configuration.
@@ -99,6 +109,21 @@ function M.resolve(opts)
       and candidate.adaptive.max_width % 1 == 0,
     "centerish: adaptive.max_width must be a positive integer"
   )
+
+  assert(type(candidate.autocmds) == "table", "centerish: autocmds must be a table")
+  for _, option in ipairs({ "enable_on_startup", "enable_on_tab" }) do
+    assert(
+      type(candidate.autocmds[option]) == "boolean",
+      "centerish: autocmds." .. option .. " must be a boolean"
+    )
+  end
+  assert(
+    type(candidate.exclude_filetypes) == "table" and vim.islist(candidate.exclude_filetypes),
+    "centerish: exclude_filetypes must be a list of strings"
+  )
+  for _, filetype in ipairs(candidate.exclude_filetypes) do
+    assert(type(filetype) == "string", "centerish: exclude_filetypes must be a list of strings")
+  end
 
   ---@cast candidate centerish.ResolvedConfig
   return candidate

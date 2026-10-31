@@ -2,6 +2,13 @@ local M = {}
 local prefix = "centerish://padding/v1/"
 local instance = tostring(vim.uv.os_getpid()) .. "-" .. string.format("%.0f", vim.uv.hrtime())
 local installed = false
+local loaded = vim.v.this_session ~= ""
+
+---Detect native sessions even when restoration preceded plugin installation.
+---@return boolean
+function M.was_loaded()
+  return loaded
+end
 
 ---Build a stable tab identity for the current plugin instance.
 ---@param tab integer Tabpage handle.
@@ -108,6 +115,7 @@ function M.install()
   vim.api.nvim_create_autocmd("SessionLoadPost", {
     group = group,
     callback = function()
+      loaded = true
       -- Loaded instances must discard old tab state and resume queued work even
       -- when this session has no saved padding.
       if package.loaded.centerish then
@@ -125,5 +133,8 @@ function M.install()
     end,
   })
 end
+
+-- Observe sessions from the first require, including before plugin startup.
+M.install()
 
 return M

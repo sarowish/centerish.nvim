@@ -60,10 +60,10 @@ also available when restoring sessions.
 | `:CenterishDisable` | Remove the current tab's padding and reset adaptive growth. |
 | `:CenterishToggle`  | Switch between those two states.                            |
 
-Each tab is enabled independently. New tabs start disabled. Window navigation
-skips padding and wraps when moving into padding at an outer edge. Exchanges
-with `<C-w>x` and rotations with `<C-w>r` or `<C-w>R` also skip padding,
-including when given a count.
+Each tab is enabled independently. New tabs start disabled by default. Window
+navigation skips padding and wraps when moving into padding at an outer edge.
+Exchanges with `<C-w>x` and rotations with `<C-w>r` or `<C-w>R` also skip
+padding, including when given a count.
 
 Setup installs window prefix mappings. For custom mappings that emit `<C-w>`,
 pass `{ remap = true }` to `vim.keymap.set()` for padding correction and manual
@@ -83,6 +83,26 @@ or run `:help centerish-config`.
 `width` is a target for each editing column, including its gutters. It is not
 a limit on the entire tab. Stacked windows share a column; unequal splits
 retain their relative widths when space permits.
+
+To enable centering automatically at startup and in new tabs:
+
+```lua
+require("centerish").setup({
+  autocmds = {
+    enable_on_startup = true,
+    enable_on_tab = true,
+  },
+})
+```
+
+Both options default to `false`. Centerish waits while a tab contains only
+excluded filetypes or recognized sidebars, then enables when an editing
+window appears. `exclude_filetypes` defaults to `alpha`, `dashboard`, and
+`snacks_dashboard`. Replace that list to recognize other dashboards.
+
+For manual overrides, session behavior, and limitations, see the
+[automatic activation reference](doc/centerish.txt) or run
+`:help centerish-autocmds`.
 
 To keep only the left margin:
 

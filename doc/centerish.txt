@@ -25,7 +25,8 @@ Open a file and run: >vim
     :CenterishToggle
 <
 Padding appears when your screen has room for it. Run the command again to
-remove the padding. Each tab is controlled separately; new tabs start off.
+remove the padding. Each tab is controlled separately; new tabs start off by
+default. For automatic activation, see |centerish-autocmds|.
 
 The default editor target is 120 columns. For optional configuration, see
 |centerish-config|.
@@ -81,6 +82,11 @@ Default configuration: >lua
         direction = "right",
         max_width = 160,
       },
+      autocmds = {
+        enable_on_startup = false,
+        enable_on_tab = false,
+      },
+      exclude_filetypes = { "alpha", "dashboard", "snacks_dashboard" },
     })
 <
 width                                                        *centerish-width*
@@ -144,6 +150,60 @@ sidebars                                                  *centerish-sidebars*
 
     To find a buffer's filetype, focus it and run :set filetype?. The table
     classifies windows by filetype; it does not open or relocate a sidebar.
+
+autocmds                                                  *centerish-autocmds*
+    Table. Both options default to false.
+
+    enable_on_startup enables the current tab after |VimEnter|. If setup runs
+    after startup, activation is scheduled from setup instead. Saved session
+    states take precedence.
+
+    If Centerish first loads while |v:this_session| is nonempty, startup
+    activation is skipped. This includes sessions saved before Centerish
+    loaded.
+
+    When configured before startup, this option hides the built-in intro
+    message without changing your 'shortmess' setting.
+
+    enable_on_tab uses |WinNew| to detect tabs created after startup.
+    Returning to an existing tab keeps its enabled or disabled state.
+    If earlier WinNew callbacks change focus or open more windows or tabs,
+    Centerish may skip activation to avoid enabling the wrong tab.
+    Replacing the originating tab from an earlier WinNew callback while
+    suppressing autocommands is unsupported. Centerish may activate the
+    replacement instead.
+
+    Activation waits while the tab contains only excluded filetypes or
+    recognized sidebars. It retries on buffer, filetype, and window changes
+    until an eligible editing window appears. Floating windows are ignored.
+    A dashboard can remain open in another split once an editor is available.
+
+    Automatic activation runs once per tab. Manual enable, disable, or toggle
+    commands cancel any pending activation in that tab. Calling
+    |centerish.setup()| clears all pending activations. With
+    enable_on_startup = true, it can enable the current tab again.
+    Automatic activation is skipped during session loading. New tabs
+    created after restoration still use enable_on_tab.
+
+    To enable both options: >lua
+
+        require("centerish").setup({
+          autocmds = {
+            enable_on_startup = true,
+            enable_on_tab = true,
+          },
+        })
+<
+exclude_filetypes                                *centerish-exclude-filetypes*
+    List of filetypes that cannot trigger automatic activation.
+    Default: { "alpha", "dashboard", "snacks_dashboard" }.
+
+    This list replaces the defaults. Set it to {} to allow all filetypes.
+    Recognized sidebars still cannot trigger automatic activation.
+
+    Exclusions only delay automatic activation. Manual commands can enable
+    centering on any filetype. Once a tab is enabled, switching its buffers
+    does not disable centering.
 
 adaptive.enabled                                  *centerish-adaptive-enabled*
     Boolean. Default: false.
@@ -315,9 +375,12 @@ LUA API                                                        *centerish-api*
 require("centerish").setup(opts)                           *centerish.setup()*
     Configure Centerish with an optional options table.
     See |centerish-config|.
-    Setup installs the mappings in |centerish-window-mappings| without enabling
-    centering. An enabled current tab is refreshed; other enabled tabs use the
-    configuration on their next refresh, including when you enter them.
+    Setup installs the mappings in |centerish-window-mappings|. Centering
+    stays disabled unless automatic activation is configured in
+    |centerish-autocmds|. An enabled current tab is refreshed; other enabled
+    tabs use the configuration on their next refresh, including when you
+    enter them. Calling setup again clears pending automatic activations.
+    With enable_on_startup = true, it can enable the current tab again.
 
 require("centerish").enable()                             *centerish.enable()*
     Enable or update the current tab without resetting adaptive growth.

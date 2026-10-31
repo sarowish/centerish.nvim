@@ -94,6 +94,22 @@ end
 
 local tests = {}
 
+tests["automatic startup and tab activation waits for editing windows"] = function()
+  dofile("tests/autocmds.lua")()
+end
+
+tests["automatic startup does not flash the native intro"] = function()
+  dofile("tests/startup_ui.lua")()
+end
+
+tests["automatic startup preserves sessions restored before activation"] = function()
+  dofile("tests/startup_session.lua")()
+end
+
+tests["automatic tab activation waits for session adoption"] = function()
+  dofile("tests/session_activation.lua")()
+end
+
 tests["window exchanges and rotations skip padding and preserve native behavior"] = function()
   dofile("tests/reorder.lua")()
 end

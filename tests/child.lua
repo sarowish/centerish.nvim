@@ -4,6 +4,7 @@ local M = {}
 ---@field name string Suite name included in request failures.
 ---@field context? fun(): string Current scenario included in request failures.
 ---@field on_notification? fun(name: string, args: any[]) Observe child notifications.
+---@field args? string[] Override Neovim arguments to attach a UI before startup.
 
 ---@class centerish.test.Child
 ---@field finished boolean Whether the child has exited.
@@ -26,7 +27,7 @@ function M.start(opts)
   local replies, sequence = {}, 0
   local decoder = vim.mpack.Unpacker()
   local process = assert(uv.spawn(vim.v.progpath, {
-    args = { "--clean", "--embed", "--headless", "-i", "NONE" },
+    args = opts.args or { "--clean", "--embed", "--headless", "-i", "NONE" },
     stdio = { input, output, errors },
   }, function(code)
     child.exitcode = code
