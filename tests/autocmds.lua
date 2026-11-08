@@ -431,6 +431,7 @@ return function(scenario)
               { autocmds = false },
               { autocmds = { enable_on_startup = "yes" } },
               { autocmds = { enable_on_tab = 1 } },
+              { autocmds = { enable_on_tab = "fast" } },
               { exclude_filetypes = false },
               { exclude_filetypes = { dashboard = true } },
               { exclude_filetypes = { "dashboard", 1 } },

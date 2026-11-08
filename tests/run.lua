@@ -102,6 +102,10 @@ tests["automatic startup does not flash the native intro"] = function()
   dofile("tests/startup_ui.lua")()
 end
 
+tests["automatic activation timing preserves input and independent policies"] = function()
+  dofile("tests/activation_timing.lua")()
+end
+
 tests["automatic startup preserves sessions restored before activation"] = function()
   dofile("tests/startup_session.lua")()
 end

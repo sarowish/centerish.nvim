@@ -49,7 +49,7 @@ local config = configuration.resolve()
 
 ---@type table<integer, centerish.TabState>
 local tabs = {}
----@type table<integer, true>
+---@type table<integer, true|"immediate">
 local auto_tabs = {}
 ---@type table<integer, true>
 local manual_tabs = {}
@@ -57,6 +57,8 @@ local known_tabs = vim.api.nvim_list_tabpages()
 local auto_pending = false
 ---@type fun()
 local schedule_auto_enable
+---@type fun(immediate_only?: boolean)
+local auto_enable
 local busy, pending = false, false
 local pending_session = false
 local dragging = false
@@ -1211,7 +1213,7 @@ local function install_events()
         and #vim.api.nvim_tabpage_list_wins(created) == 1
         and not manual_tabs[created]
       then
-        auto_tabs[created] = true
+        auto_tabs[created] = config.autocmds.enable_on_tab == "immediate" and "immediate" or true
         schedule_auto_enable()
       end
     end,
@@ -1226,7 +1228,7 @@ local function install_events()
       if config.autocmds.enable_on_startup then
         local tab = vim.api.nvim_get_current_tabpage()
         if not manual_tabs[tab] then
-          auto_tabs[tab] = true
+          auto_tabs[tab] = config.autocmds.enable_on_startup == "immediate" and "immediate" or true
           -- Let startup hooks draw their dashboards before the first redraw.
           -- Restore the intro flag synchronously so later callbacks own their changes.
           vim.api.nvim_create_autocmd("SafeState", {
@@ -1394,6 +1396,16 @@ local function install_events()
   -- Padding may be created or removed here. Keep its normal lifecycle events
   -- visible to other plugins while our transaction guard prevents recursion.
   vim.api.nvim_create_autocmd("WinResized", { group = group, nested = true, callback = schedule })
+
+  -- Opt-in activation can precede redraw, without running queued callbacks here.
+  -- Padding still emits its normal events under the transaction guard.
+  vim.api.nvim_create_autocmd("SafeState", {
+    group = group,
+    nested = true,
+    callback = function()
+      auto_enable(true)
+    end,
+  })
 
   -- Rotating equal-sized windows need not emit a resize or enter event.
   vim.api.nvim_create_autocmd("SafeState", {
@@ -1650,8 +1662,36 @@ local function can_auto_enable(tab)
   return false
 end
 
+---Activate eligible pending tabs, preserving focus if the user has changed tabs.
+---The before-redraw pass only consumes tabs armed with the immediate policy.
+---@param immediate_only? boolean
+auto_enable = function(immediate_only)
+  if
+    busy
+    or dragging
+    or session_loading()
+    or vim.v.vim_did_enter == 0
+    or (immediate_only and (request_pending or #requests > 0))
+  then
+    return
+  end
+  local configured = config
+  for tab, timing in pairs(auto_tabs) do
+    if not vim.api.nvim_tabpage_is_valid(tab) or tabs[tab] then
+      auto_tabs[tab] = nil
+    elseif (not immediate_only or timing == "immediate") and can_auto_enable(tab) then
+      request(function(origin)
+        if config == configured and auto_tabs[origin] and can_auto_enable(origin) then
+          auto_tabs[origin] = nil
+          enable(origin)
+        end
+      end, tab)
+    end
+  end
+end
+
 ---Wait until a pending tab contains an ordinary window outside the excluded filetypes.
----Run after startup and buffer callbacks, preserving focus if the user has changed tabs.
+---Run after startup and buffer callbacks; also provide a fallback for immediate tabs.
 schedule_auto_enable = function()
   if
     auto_pending
@@ -1666,22 +1706,7 @@ schedule_auto_enable = function()
   auto_pending = true
   vim.defer_fn(function()
     auto_pending = false
-    if busy or dragging or session_loading() then
-      return
-    end
-    local configured = config
-    for tab in pairs(auto_tabs) do
-      if not vim.api.nvim_tabpage_is_valid(tab) or tabs[tab] then
-        auto_tabs[tab] = nil
-      elseif can_auto_enable(tab) then
-        request(function(origin)
-          if config == configured and auto_tabs[origin] and can_auto_enable(origin) then
-            auto_tabs[origin] = nil
-            enable(origin)
-          end
-        end, tab)
-      end
-    end
+    auto_enable()
   end, 0)
 end
 
@@ -1699,7 +1724,9 @@ function M.setup(opts)
     and not session_loading()
     and not session.was_loaded()
   then
-    auto_tabs[vim.api.nvim_get_current_tabpage()] = true
+    auto_tabs[vim.api.nvim_get_current_tabpage()] = config.autocmds.enable_on_startup == "immediate"
+        and "immediate"
+      or true
     schedule_auto_enable()
   end
   queue_refresh()

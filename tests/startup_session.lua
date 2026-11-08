@@ -1,5 +1,5 @@
 -- Session adoption can finish before VimEnter or before a late initial setup.
-return function()
+local function check(timing)
   local path = vim.fn.tempname() .. ".vim"
   local empty_path = vim.fn.tempname() .. ".vim"
   local scenario = "save"
@@ -40,8 +40,11 @@ return function()
       "require_restore",
     }) do
       scenario = case
-      local setup =
-        [[require('centerish').setup({width=80,autocmds={enable_on_startup=true,enable_on_tab=true}})]]
+      local setup = string.format(
+        [[require('centerish').setup({width=80,autocmds={enable_on_startup=%s,enable_on_tab=%s}})]],
+        vim.inspect(timing),
+        vim.inspect(timing)
+      )
       local init = "vim.opt.runtimepath:prepend("
         .. string.format("%q", vim.fn.getcwd())
         .. ")\nvim.o.columns=240\n"
@@ -112,17 +115,21 @@ return function()
       if case == "settled" or case == "late_setup" then
         vim.list_extend(args, { "-c", "lua vim.wait(20, function() return false end)" })
       end
-      child = children.start({ name = "startup session: " .. case, args = args })
+      child = children.start({
+        name = "startup session: " .. case .. " (" .. tostring(timing) .. ")",
+        args = args,
+      })
       child.settle(80)
       if case == "unloaded_runtime" then
         child.request("nvim_exec_lua", {
           [[
+          local path, timing = ...
           assert(not package.loaded.centerish)
-          vim.cmd.source(...)
+          vim.cmd.source(path)
           assert(not package.loaded.centerish)
-          require('centerish').setup({width=80,autocmds={enable_on_startup=true,enable_on_tab=true}})
+          require('centerish').setup({width=80,autocmds={enable_on_startup=timing,enable_on_tab=timing}})
         ]],
-          { empty_path },
+          { empty_path, timing },
         })
         child.settle(80)
       end
@@ -171,4 +178,9 @@ return function()
   vim.fn.delete(path)
   vim.fn.delete(empty_path)
   assert(ok, scenario .. ": " .. tostring(err))
+end
+
+return function()
+  check(true)
+  check("immediate")
 end

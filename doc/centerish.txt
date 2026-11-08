@@ -152,7 +152,20 @@ sidebars                                                  *centerish-sidebars*
     classifies windows by filetype; it does not open or relocate a sidebar.
 
 autocmds                                                  *centerish-autocmds*
-    Table. Both options default to false.
+    Table. Both options accept false, true, or "immediate" and default to false.
+
+    false disables automatic activation for that event. true defers activation
+    so queued startup or tab callbacks can run first. "immediate" also permits
+    activation at |SafeState| before redraw, avoiding the initial shift when
+    possible. The two options choose their timing independently.
+
+    Immediate activation can precede scheduled callbacks, timers, or later
+    SafeState hooks. Dashboards that initialize there may see padding windows
+    and fail to open, or set their excluded filetype after activation. Use true
+    if a dashboard needs to initialize before padding appears. A queued disable
+    or session load still takes precedence, but may undo a visible centered
+    frame. Earlier forced redraws, pending input or layout work, and late setup
+    can still expose the initial shift. Deferred activation remains a fallback.
 
     enable_on_startup enables the current tab after |VimEnter|. If setup runs
     after startup, activation is scheduled from setup instead. Saved session
@@ -181,7 +194,7 @@ autocmds                                                  *centerish-autocmds*
     Automatic activation runs once per tab. Manual enable, disable, or toggle
     commands cancel any pending activation in that tab. Calling
     |centerish.setup()| clears all pending activations. With
-    enable_on_startup = true, it can enable the current tab again.
+    startup activation enabled, it can enable the current tab again.
     Automatic activation is skipped during session loading. New tabs
     created after restoration still use enable_on_tab.
 
@@ -380,7 +393,7 @@ require("centerish").setup(opts)                           *centerish.setup()*
     |centerish-autocmds|. An enabled current tab is refreshed; other enabled
     tabs use the configuration on their next refresh, including when you
     enter them. Calling setup again clears pending automatic activations.
-    With enable_on_startup = true, it can enable the current tab again.
+    With startup activation enabled, it can enable the current tab again.
 
 require("centerish").enable()                             *centerish.enable()*
     Enable or update the current tab without resetting adaptive growth.

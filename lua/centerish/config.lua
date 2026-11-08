@@ -2,6 +2,7 @@ local M = {}
 
 ---@alias centerish.Side "left" | "right"
 ---@alias centerish.GrowthDirection "right" | "both"
+---@alias centerish.AutoActivation boolean | "immediate"
 
 ---@class (exact) centerish.PaddingConfig
 ---@field left? boolean Show left padding. Defaults to true.
@@ -20,8 +21,8 @@ local M = {}
 ---@field preserve_width boolean
 
 ---@class (exact) centerish.AutocmdConfig
----@field enable_on_startup? boolean Enable after startup once an editing window is available. Defaults to false.
----@field enable_on_tab? boolean Enable new tabs once an editing window is available. Defaults to false.
+---@field enable_on_startup? centerish.AutoActivation Enable after startup; "immediate" permits activation before redraw. Defaults to false.
+---@field enable_on_tab? centerish.AutoActivation Enable new tabs; "immediate" permits activation before redraw. Defaults to false.
 
 ---@class (exact) centerish.Config
 ---@field width? integer Centered target width, including gutters. Defaults to 120.
@@ -38,7 +39,7 @@ local M = {}
 ---@field padding { left: boolean, right: boolean }
 ---@field sidebars table<string, centerish.Side|centerish.SidebarConfig|false>
 ---@field adaptive { enabled: boolean, direction: centerish.GrowthDirection, max_width: integer }
----@field autocmds { enable_on_startup: boolean, enable_on_tab: boolean }
+---@field autocmds { enable_on_startup: centerish.AutoActivation, enable_on_tab: centerish.AutoActivation }
 ---@field exclude_filetypes string[]
 
 ---@class centerish.ResolvedConfig: centerish.MergedConfig
@@ -113,8 +114,8 @@ function M.resolve(opts)
   assert(type(candidate.autocmds) == "table", "centerish: autocmds must be a table")
   for _, option in ipairs({ "enable_on_startup", "enable_on_tab" }) do
     assert(
-      type(candidate.autocmds[option]) == "boolean",
-      "centerish: autocmds." .. option .. " must be a boolean"
+      type(candidate.autocmds[option]) == "boolean" or candidate.autocmds[option] == "immediate",
+      "centerish: autocmds." .. option .. ' must be a boolean or "immediate"'
     )
   end
   assert(

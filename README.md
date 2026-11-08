@@ -100,6 +100,10 @@ excluded filetypes or recognized sidebars, then enables when an editing
 window appears. `exclude_filetypes` defaults to `alpha`, `dashboard`, and
 `snacks_dashboard`. Replace that list to recognize other dashboards.
 
+Set either option to `"immediate"` to center before redraw when possible and
+avoid the initial shift. This can run before a dashboard's scheduled setup.
+Keep `true` if your dashboard needs to initialize before padding appears.
+
 For manual overrides, session behavior, and limitations, see the
 [automatic activation reference](doc/centerish.txt) or run
 `:help centerish-autocmds`.

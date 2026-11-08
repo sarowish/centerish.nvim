@@ -1,5 +1,5 @@
 -- User-created tabs wait for adoption after native session sourcing returns.
-return function()
+local function check(timing)
   local children = dofile("tests/child.lua")
   local path = vim.fn.tempname() .. ".vim"
   local scenario
@@ -23,12 +23,15 @@ return function()
       if case == "earlier_hook" then
         init = init .. "hook()\n"
       end
-      init = init .. "require('centerish').setup({width=80,autocmds={enable_on_tab=true}})\n"
+      init = init
+        .. "require('centerish').setup({width=80,autocmds={enable_on_tab="
+        .. vim.inspect(timing)
+        .. "}})\n"
       if case == "later_hook" then
         init = init .. "hook()\n"
       end
       child = children.start({
-        name = "session activation: " .. case,
+        name = "session activation: " .. case .. " (" .. tostring(timing) .. ")",
         args = { "--clean", "--headless", "--embed", "-i", "NONE", "--cmd", "lua " .. init },
       })
       child.settle()
@@ -83,4 +86,9 @@ return function()
   end
   vim.fn.delete(path)
   assert(ok, tostring(scenario) .. ": " .. tostring(err))
+end
+
+return function()
+  check(true)
+  check("immediate")
 end
